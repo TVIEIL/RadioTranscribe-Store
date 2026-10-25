@@ -1,0 +1,35 @@
+# Fichiers temporaires Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Audio et flux RAM disk
+*.wav
+*.mp3
+*.ogg
+*.raw
+/dev/shm/*
+
+# Modèles et caches STT / Hugging Face
+models/
+assets/
+.cache/
+huggingface/
+
+# Bases de données locales et secrets
+*.sqlite3
+*.db
+chroma_data/
+config.json
+.env
+
+# Logs et éditeurs
+*.log
+.vscode/
+.idea/
+*~
