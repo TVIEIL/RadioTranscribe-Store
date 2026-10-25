@@ -34,9 +34,8 @@ while True:
         print(f"\n--- Résultats pour : « {query} » ---")
         for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
             date_str = meta.get("captured_at", "Date inconnue")
-            # Plus la distance cosinus est proche de 0, plus le contenu est pertinent
-            #score = max(0.0, 1.0 - dist)
-            score  = 1.0 / (1.0 + dist)
+            # Normalisation de la distance L2 en score lisible
+            score = 1.0 / (1.0 + dist)
 
             print(f"\n[{i}] Capture du {date_str} (Pertinence : {score:.0%})")
             print(f"    « {doc} »")
