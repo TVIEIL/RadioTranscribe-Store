@@ -28,6 +28,7 @@
       │
       ├──> [ MariaDB ]   ──> Archivage chronologique persistant
       └──> [ ChromaDB ]  ──> Indexation vectorielle sémantique (RAG)
+```
 
 ## Installation rapide
 
@@ -38,6 +39,7 @@ git clone [https://github.com/TVIEIL/RadioTranscribe-Store.git](https://github.c
 cd RadioTranscribe-Store
 chmod +x install.sh uninstall.sh
 sudo ./install.sh
+```
 
 ## Désinstallation
 
@@ -46,5 +48,6 @@ Le projet fournit un script de désinstallation interactive (`uninstall.sh`) con
 ```bash
 chmod +x uninstall.sh
 sudo ./uninstall.sh
+```
 
 
