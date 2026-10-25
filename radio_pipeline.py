@@ -1,3 +1,7 @@
+"""
+radio_pipeline.py - Pipeline continu de veille et transcription radio.
+RTL-SDR -> RAM Disk (/dev/shm) -> Faster-Whisper -> MariaDB & ChromaDB.
+"""
 from datetime import datetime
 import glob
 import os
@@ -9,24 +13,49 @@ import chromadb
 from faster_whisper import WhisperModel
 import pymysql
 
-# --- Configuration ---
-FREQ = "87.8M"
-CHUNK_DURATION = 30
-TEMP_DIR = "/dev/shm/radio_chunks"
-ARCHIVE_DIR = "/home/vieil/radio_archive"
+# --- Paramètres de capture et chemins ---
+FREQ = os.getenv("RADIO_FREQ", "87.8M")
+CHUNK_DURATION = int(os.getenv("RADIO_CHUNK_DURATION", "30"))
+TEMP_DIR = os.getenv("RADIO_TEMP_DIR", "/dev/shm/radio_chunks")
+ARCHIVE_DIR = os.path.expanduser(os.getenv("RADIO_ARCHIVE_DIR", "~/radio_archive"))
 
+# --- Configuration MariaDB ---
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "compute1",
-    "password": "G2LAMaria!",
-    "database": "radio_monitoring",
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "radio_user"),
+    "password": os.getenv("DB_PASS", "votre_mot_de_passe"),
+    "database": os.getenv("DB_NAME", "radio_monitoring"),
     "autocommit": True,
 }
 
+# --- Configuration ChromaDB ---
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "radio_news")
+
+# --- Mots-clés d'artefacts et hallucinations à filtrer ---
+BANNED_WORDS = [
+    "sous-titr",
+    "jérémy diaz",
+    "jeremy diaz",
+    "radio-canada",
+    "société radio-canada",
+    "st' 501",
+    "st 501",
+    "regardé cette vidéo",
+    "visionné cette vidéo",
+    "merci d'avoir regardé",
+    "abonnez-vous",
+    "pouce bleu",
+    "tipeurs",
+    "souscripteurs",
+]
+
+# Initialisation des dossiers
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-# Purge initiale de la RAM
+# Purge des segments audio résiduels en RAM
 for f in glob.glob(f"{TEMP_DIR}/*.wav"):
     try:
         os.remove(f)
@@ -42,8 +71,8 @@ print("[*] Connexion aux bases de données...")
 db = pymysql.connect(**DB_CONFIG)
 cursor = db.cursor()
 
-chroma_client = chromadb.HttpClient(host="localhost", port=8000)
-collection = chroma_client.get_or_create_collection(name="radio_news")
+chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
 
 print(f"[*] Démarrage de la capture continue sur {FREQ}...")
 capture_cmd = (
@@ -59,11 +88,11 @@ try:
     while True:
         wav_files = sorted(glob.glob(f"{TEMP_DIR}/chunk_*.wav"))
 
-        # On ne traite que lorsqu'un second fichier est en cours d'écriture
+        # On ne traite que lorsqu'un nouveau segment a commencé à s'écrire
         if len(wav_files) > 1:
             file_to_process = wav_files[0]
 
-            # 1. Élimination immédiate des fichiers tronqués
+            # 1. Élimination des fichiers tronqués (< 100 Ko)
             try:
                 if os.path.getsize(file_to_process) < 100000:
                     os.remove(file_to_process)
@@ -84,7 +113,7 @@ try:
             t0 = time.time()
 
             try:
-                # 2. Transcription sans boucle infinie et avec VAD
+                # 2. Transcription Whisper avec VAD et répétition contrôlée
                 segments, _ = model.transcribe(
                     file_to_process,
                     language="fr",
@@ -103,32 +132,19 @@ try:
                     text = s.text.strip()
                     clean_lower = text.lower()
 
-                    # 1. Rejet des silences / musiques selon Whisper
+                    # Rejet musique / silence
                     if s.no_speech_prob > 0.6:
                         continue
 
-                    # 2. Rejet des ponctuations seules
+                    # Rejet ponctuation vide
                     if not text or text in ["...", "…", ".", "-"]:
                         continue
 
-                    # 3. Rejet des hallucinations de sous-titrage connues
-                    banned_words = [
-                        "sous-titr",
-                        "jérémy diaz",
-                        "jeremy diaz",
-                        "radio-canada",
-                        "regardé cette vidéo",
-                        "merci d'avoir regardé",
-                        "visionné cette vidéo",
-                        "abonnez-vous",
-                        "pouce bleu",
-                    ]
-
-                    if any(w in clean_lower for w in banned_words):
+                    # Rejet des hallucinations connues
+                    if any(w in clean_lower for w in BANNED_WORDS):
                         continue
 
-
-            
+                    # Insertion MariaDB
                     sql = """
                         INSERT INTO transcriptions (frequency, start_time, end_time, text)
                         VALUES (%s, %s, %s, %s)
@@ -141,7 +157,7 @@ try:
                     captured_segments.append(text)
                     print(f"  [SQL #{inserted_id}] {text}")
 
-                # 3. Indexation ChromaDB ou affichage du rejet
+                # 3. Indexation ChromaDB du bloc agrégé
                 duree = time.time() - t0
                 if captured_segments:
                     aggregated_text = " ".join(captured_segments)
@@ -173,10 +189,8 @@ try:
                 print(f"[!] Erreur de traitement sur {file_to_process} : {e}")
 
             finally:
-                # 4. Déplacement inconditionnel : la file avance quoiqu'il arrive
-                dest_archive = os.path.join(
-                    ARCHIVE_DIR, Path(file_to_process).name
-                )
+                # 4. Archivage ou suppression du fichier audio traité
+                dest_archive = os.path.join(ARCHIVE_DIR, Path(file_to_process).name)
                 try:
                     shutil.move(file_to_process, dest_archive)
                 except OSError:
@@ -188,7 +202,7 @@ try:
         time.sleep(1)
 
 except KeyboardInterrupt:
-    print("\nArrêt demandé...")
+    print("\nArrêt du pipeline...")
     capture_process.terminate()
     capture_process.wait()
 finally:
