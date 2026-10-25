@@ -1,3 +1,5 @@
+<img width="2752" height="1536" alt="Gemini_Generated_Image_hki91qhki91qhki9" src="https://github.com/user-attachments/assets/04092e7b-e4ea-4618-9086-daf1615719ca" />
+
 # RadioTranscribe-Store
 
 > Pipeline autonome d'écoute radio continue (RTL-SDR), transcription automatique en temps réel (Faster-Whisper) et double indexation persistance SQL & vectorielle (MariaDB + ChromaDB).
