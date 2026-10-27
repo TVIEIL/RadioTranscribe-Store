@@ -35,7 +35,7 @@
 Un script d'automatisation clé en main configure l'ensemble des prérequis (dépendances système, blacklist du pilote DVB, base MariaDB, environnement Conda et services systemd) :
 
 ```bash
-git clone [https://github.com/TVIEIL/RadioTranscribe-Store.git](https://github.com/TVIEIL/RadioTranscribe-Store.git)
+git clone   https://github.com/TVIEIL/RadioTranscribe-Store.git
 cd RadioTranscribe-Store
 chmod +x install.sh uninstall.sh
 sudo ./install.sh
