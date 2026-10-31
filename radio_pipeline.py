@@ -96,7 +96,7 @@ collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
 
 print(f"[*] Démarrage de la capture continue sur {FREQ}...")
 capture_cmd = (
-    f"rtl_fm -f {FREQ} -M wfm -s 200k -r 16k - 2>/dev/null | "
+    f"rtl_fm -f {FREQ} -M wfm -s 200k -r 16k -g 42 -E deemp - 2>/dev/null | "
     f"ffmpeg -y -f s16le -ar 16000 -ac 1 -i - "
     f"-f segment -segment_time {CHUNK_DURATION} -strftime 1 "
     f'"{TEMP_DIR}/chunk_%Y%m%d_%H%M%S.wav" -loglevel quiet'
