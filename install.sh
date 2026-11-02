@@ -57,7 +57,7 @@ USE ${DB_NAME};
 CREATE TABLE IF NOT EXISTS transcriptions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    frequency VARCHAR(16) DEFAULT '87.8M',
+    frequency VARCHAR(32) DEFAULT '87.8M',
     start_time FLOAT DEFAULT 0.0,
     end_time FLOAT DEFAULT 0.0,
     text TEXT NOT NULL,
