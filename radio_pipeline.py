@@ -22,209 +22,342 @@
 radio_pipeline.py - Pipeline continu de veille et transcription radio.
 RTL-SDR -> RAM Disk (/dev/shm) -> Faster-Whisper -> MariaDB & ChromaDB.
 """
-from datetime import datetime
-import glob
 import os
-from pathlib import Path
-import shutil
-import subprocess
+import sys
 import time
+import glob
+import signal
+import socket
+import argparse
+import subprocess
+from datetime import datetime
+
+import numpy as np
+import pymysql
 import chromadb
 from faster_whisper import WhisperModel
-import pymysql
 
-# --- Paramètres de capture et chemins ---
-FREQ = os.getenv("RADIO_FREQ", "87.8M")
-CHUNK_DURATION = int(os.getenv("RADIO_CHUNK_DURATION", "30"))
-TEMP_DIR = os.getenv("RADIO_TEMP_DIR", "/dev/shm/radio_chunks")
-ARCHIVE_DIR = os.path.expanduser(os.getenv("RADIO_ARCHIVE_DIR", "~/radio_archive"))
-
-# --- Configuration MariaDB ---
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "radio_user"),
-    "password": os.getenv("DB_PASS", "votre_mot_de_passe"),
-    "database": os.getenv("DB_NAME", "radio_monitoring"),
-    "autocommit": True,
+# --- Configuration des stations et seuils ---
+STATIONS_CONFIG = {
+    "inter": {
+        "freq": 87.8e6,
+        "alt_freq": None,
+        "http_fallback": "http://icecast.radiofrance.fr/franceinter-midfi.mp3",
+    },
+    "culture": {
+        "freq": 93.5e6,       # Tour Eiffel
+        "alt_freq": 90.7e6,   # Creil / Nogent (Nord-IDF / Oise)
+        "http_fallback": "http://icecast.radiofrance.fr/franceculture-midfi.mp3",
+    },
+    "info": {
+        "freq": 105.5e6,
+        "alt_freq": None,
+        "http_fallback": "http://icecast.radiofrance.fr/franceinfo-midfi.mp3",
+    },
 }
 
-# --- Configuration ChromaDB ---
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
-CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "radio_news")
+SNR_THRESHOLD_DB = 15.0
+CRITICAL_FLOOR_DB = 5.0
+CHUNK_DURATION_SEC = 30
 
-# --- Mots-clés d'artefacts et hallucinations à filtrer ---
+# Configuration bases de données
+DB_HOST = "127.0.0.1"
+DB_USER = "root"
+DB_PASS = ""
+DB_NAME = "radio_db"
+CHROMA_PATH = os.path.expanduser("~/sdr-stt/chroma_data")
+
+# Mots/expressions parasites à filtrer
 BANNED_WORDS = [
-    "sous-titr",
-    "jérémy diaz",
-    "jeremy diaz",
-    "radio-canada",
-    "société radio-canada",
-    "st' 501",
-    "st 501",
-    "regardé cette vidéo",
-    "visionné cette vidéo",
-    "merci d'avoir regardé",
-    "abonnez-vous",
-    "pouce bleu",
-    "tipeurs",
-    "souscripteurs",
+    "sous-titrage", "sous-titres", "transcription",
+    "musique", "applaudissements", "rires"
 ]
 
-# Initialisation des dossiers
+# Variables globales de processus pour arrêt propre
+capture_proc = None
+db_conn = None
+
+
+def signal_handler(sig, frame):
+    """Interception des signaux SIGINT/SIGTERM pour un arrêt sans zombies."""
+    print("\n[*] Signal SIGTERM reçu : arrêt ordonné du pipeline...")
+    if capture_proc and capture_proc.poll() is None:
+        print("[*] Arrêt du sous-processus de capture...")
+        try:
+            os.killpg(os.getpgid(capture_proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if db_conn:
+        try:
+            db_conn.close()
+        except Exception:
+            pass
+    print("[*] Connexions fermées. Arrêt propre terminé.")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+def check_internet(host="1.1.1.1", port=53, timeout=2.0) -> bool:
+    """Vérifie la connectivité sortante en testant une socket UDP rapide."""
+    try:
+        socket.setdefaulttimeout(timeout)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((host, port))
+        return True
+    except (socket.timeout, OSError):
+        return False
+
+
+def measure_rf_snr(freq_hz: float, sample_rate: int = 250000, duration: float = 0.4) -> float:
+    """Capture une courte trame I/Q brute avec rtl_sdr pour calculer le SNR RF."""
+    num_samples = int(sample_rate * duration)
+    cmd = [
+        "rtl_sdr",
+        "-f", str(int(freq_hz)),
+        "-s", str(sample_rate),
+        "-n", str(num_samples * 2),
+        "-g", "42",
+        "-"
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        raw_bytes, _ = proc.communicate(timeout=3.0)
+        if len(raw_bytes) < num_samples * 2:
+            return 0.0
+
+        iq = np.frombuffer(raw_bytes, dtype=np.uint8).astype(np.float32) - 127.5
+        iq_complex = iq[0::2] + 1j * iq[1::2]
+
+        # FFT avec suppression de l'offset DC central
+        fft_vals = np.abs(np.fft.fftshift(np.fft.fft(iq_complex))) ** 2
+        center = len(fft_vals) // 2
+        fft_vals[center - 10:center + 10] = 0.0
+
+        signal_power = np.max(fft_vals)
+        noise_power = np.median(fft_vals)
+
+        if noise_power <= 0:
+            return 0.0
+
+        snr = 10.0 * np.log10(signal_power / noise_power)
+        return float(snr)
+    except Exception:
+        return 0.0
+
+
+def resolve_audio_source(station: str):
+    """Détermine la meilleure source entre tuner SDR local et flux Icecast HTTP."""
+    cfg = STATIONS_CONFIG[station]
+    target_freq = cfg["freq"]
+    alt_freq = cfg.get("alt_freq")
+
+    print(f"[*] Analyse RF préliminaire pour {station.upper()}...")
+    snr_main = measure_rf_snr(target_freq)
+    print(f"[*] {target_freq / 1e6:.1f} MHz : SNR = {snr_main:.1f} dB (seuil: {SNR_THRESHOLD_DB:.1f} dB)")
+
+    snr_alt = 0.0
+    if snr_main < SNR_THRESHOLD_DB and alt_freq:
+        snr_alt = measure_rf_snr(alt_freq)
+        print(f"[*] Fréquence alternative {alt_freq / 1e6:.1f} MHz : SNR = {snr_alt:.1f} dB")
+
+    best_freq = target_freq if snr_main >= snr_alt else alt_freq
+    best_snr = max(snr_main, snr_alt)
+
+    # Réception RF suffisante
+    if best_snr >= SNR_THRESHOLD_DB:
+        return "rf", best_freq
+
+    # Signal insuffisant : basculement conditionnel
+    print("[*] Signal RF faible. Contrôle de la connexion Internet...")
+    if check_internet():
+        print("[*] Connexion active : bascule sur le flux HTTP officiel.")
+        return "http", cfg["http_fallback"]
+
+    # Mode 100% hors-ligne sans connexion
+    print("[!] Absence de connexion Internet : maintien sur la meilleure fréquence RF disponible.")
+    if best_snr < CRITICAL_FLOOR_DB:
+        print(f"[!] ERREUR CRITIQUE : SNR trop bas ({best_snr:.1f} dB < {CRITICAL_FLOOR_DB} dB) et pas d'Internet.")
+        print("[!] Annulation de l'écoute pour éviter de saturer le RAG de transcriptions fantômes.")
+        sys.exit(1)
+
+    print(f"[*] Capture hors-ligne maintenue sur {best_freq / 1e6:.1f} MHz (SNR: {best_snr:.1f} dB).")
+    return "rf", best_freq
+
+
+# --- Parser d'arguments ---
+parser = argparse.ArgumentParser(description="Pipeline de transcription Radio France")
+parser.add_argument("--station", choices=list(STATIONS_CONFIG.keys()), default="inter", help="Station cible (défaut : inter)")
+parser.add_argument("--force-http", action="store_true", help="Forcer le flux HTTP sans tester le SDR")
+parser.add_argument("--mute", action="store_true", help="Désactiver l'écoute haut-parleur (silence total)")
+args = parser.parse_args()
+
+# Cloisonnement étanche de l'espace temporaire en RAM par station
+TEMP_DIR = f"/dev/shm/radio_chunks_{args.station}"
+ARCHIVE_DIR = os.path.expanduser(f"~/sdr-stt/archive_{args.station}")
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-# Purge des segments audio résiduels en RAM
+# Purge des chunks orphelins résiduels en RAM
 for f in glob.glob(f"{TEMP_DIR}/*.wav"):
     try:
         os.remove(f)
     except OSError:
         pass
 
+# Résolution de la source audio
+if args.force_http:
+    source_type, source_target = "http", STATIONS_CONFIG[args.station]["http_fallback"]
+else:
+    source_type, source_target = resolve_audio_source(args.station)
+
+# Construction de la commande de capture (labels limités à 8 caractères pour MariaDB VARCHAR(10))
+if source_type == "rf":
+    freq_int = int(source_target)
+    freq_label = f"{args.station.upper()[:3]}-{freq_int / 1e6:.1f}"  # ex: INT-87.8
+    source_pipe = f"rtl_fm -f {freq_int} -M wfm -s 200k -r 16k -g 42 -E deemp - 2>/dev/null"
+else:
+    freq_label = f"{args.station.upper()[:3]}-WEB"  # ex: INT-WEB
+    source_pipe = f"ffmpeg -y -i '{source_target}' -ac 1 -ar 16000 -f s16le -loglevel quiet -"
+
+# Branche d'écoute permanente tolérante aux pannes ALSA
+if not args.mute:
+    monitor_pipe = "tee >( aplay -q -r 16000 -f S16_LE -c 1 || cat >/dev/null ) 2>/dev/null | "
+    print("[*] Écoute haut-parleur activée (tolérante aux erreurs ALSA/carte son).")
+else:
+    monitor_pipe = ""
+
+print(f"[*] Source active : {freq_label}")
+
+# Commande pipeline globale : capture | écoute locale | découpe par blocs de 30 s
+segment_pipe = f"ffmpeg -f s16le -ar 16000 -ac 1 -i - -f segment -segment_time {CHUNK_DURATION_SEC} -strftime 1 '{TEMP_DIR}/chunk_%Y%m%d_%H%M%S.wav' -loglevel quiet"
+full_capture_cmd = f"{source_pipe} | {monitor_pipe} {segment_pipe}"
+
+# Initialisation du modèle Faster-Whisper
 print("[*] Chargement du modèle Faster-Whisper large-v3...")
 model = WhisperModel(
-    "large-v3", device="cpu", compute_type="int8", cpu_threads=16
+    "large-v3",
+    device="cuda",
+    compute_type="float16"
 )
 
-print("[*] Connexion aux bases de données...")
-db = pymysql.connect(**DB_CONFIG)
-cursor = db.cursor()
-
-chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
-
-print(f"[*] Démarrage de la capture continue sur {FREQ}...")
-capture_cmd = (
-    f"rtl_fm -f {FREQ} -M wfm -s 200k -r 16k -g 42 -E deemp - 2>/dev/null | "
-    f"ffmpeg -y -f s16le -ar 16000 -ac 1 -i - "
-    f"-f segment -segment_time {CHUNK_DURATION} -strftime 1 "
-    f'"{TEMP_DIR}/chunk_%Y%m%d_%H%M%S.wav" -loglevel quiet'
+# Connexions aux bases de données
+print("[*] Connexion MariaDB et ChromaDB...")
+db_conn = pymysql.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASS,
+    database=DB_NAME,
+    autocommit=True,
+    cursorclass=pymysql.cursors.DictCursor
 )
-capture_process = subprocess.Popen(capture_cmd, shell=True)
-print("[*] Ingestion continue active.\n")
+cursor = db_conn.cursor()
 
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+chroma_collection = chroma_client.get_or_create_collection(
+    name="radio_transcriptions",
+    metadata={"hnsw:space": "cosine"}
+)
+
+# Démarrage du sous-processus de capture en arrière-plan
+capture_proc = subprocess.Popen(
+    full_capture_cmd,
+    shell=True,
+    executable="/bin/bash",
+    preexec_fn=os.setsid
+)
+
+print("[*] Ingestion continue active.")
+
+# Boucle principale de transcription
 try:
     while True:
         wav_files = sorted(glob.glob(f"{TEMP_DIR}/chunk_*.wav"))
 
-        # On ne traite que lorsqu'un nouveau segment a commencé à s'écrire
-        if len(wav_files) > 1:
-            file_to_process = wav_files[0]
+        # On attend d'avoir au moins deux fichiers pour ne pas lire le bloc en cours d'écriture
+        if len(wav_files) <= 1:
+            time.sleep(1.0)
+            continue
 
-            # 1. Élimination des fichiers tronqués (< 100 Ko)
+        chunk_path = wav_files[0]
+        base_name = os.path.basename(chunk_path)
+        timestamp_str = base_name.replace("chunk_", "").replace(".wav", "")
+
+        try:
+            timestamp_dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+            timestamp_unix = int(timestamp_dt.timestamp())
+        except ValueError:
+            timestamp_unix = int(time.time())
+
+        t0 = time.time()
+        segments_gen, _ = model.transcribe(
+            chunk_path,
+            language="fr",
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+            beam_size=5
+        )
+
+        segments = list(segments_gen)
+        captured_segments = []
+
+        if not segments:
+            duree = time.time() - t0
+            print(f"[-] Bloc {timestamp_dt.strftime('%Y-%m-%d %H:%M:%S')} ignoré (musique/silence) en {duree:.2f}s")
             try:
-                if os.path.getsize(file_to_process) < 100000:
-                    os.remove(file_to_process)
-                    continue
+                os.remove(chunk_path)
             except OSError:
+                pass
+            continue
+
+        for s in segments:
+            text = s.text.strip()
+            clean_lower = text.lower()
+
+            # Filtrage VAD / silence / résidus
+            if s.no_speech_prob > 0.6:
+                continue
+            if not text or text in ["...", "…", ".", "-"]:
+                continue
+            if any(w in clean_lower for w in BANNED_WORDS):
                 continue
 
-            filename = Path(file_to_process).stem
-            time_part = filename.replace("chunk_", "")
-            try:
-                dt = datetime.strptime(time_part, "%Y%m%d_%H%M%S")
-                timestamp_unix = int(dt.timestamp())
-                timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                timestamp_unix = int(time.time())
-                timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            # Insertion stricte dans MariaDB
+            sql = """
+            INSERT INTO transcriptions (frequency, start_time, end_time, text)
+            VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql, (freq_label, s.start, s.end, text))
+            inserted_id = cursor.lastrowid
+            captured_segments.append(text)
+            print(f" [SQL #{inserted_id}] {text}")
 
-            t0 = time.time()
+        duree = time.time() - t0
 
-            try:
-                # 2. Transcription Whisper avec VAD et répétition contrôlée
-                segments, _ = model.transcribe(
-                    file_to_process,
-                    language="fr",
-                    beam_size=5,
-                    condition_on_previous_text=False,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=500),
-                    repetition_penalty=1.2,
-                )
+        # Indexation vectorielle dans ChromaDB
+        if captured_segments:
+            aggregated_text = " ".join(captured_segments)
+            chunk_uid = f"chunk_{timestamp_unix}"
+            chroma_collection.add(
+                documents=[aggregated_text],
+                metadatas=[{
+                    "frequency": freq_label,
+                    "timestamp": timestamp_unix,
+                    "segments_count": len(captured_segments)
+                }],
+                ids=[chunk_uid]
+            )
+            print(f"[ChromaDB] Bloc {timestamp_dt.strftime('%Y-%m-%d %H:%M:%S')} indexé en {duree:.2f}s ({len(captured_segments)} segments) -> ID: {chunk_uid}")
 
-                captured_segments = []
-                first_id = None
-                last_id = None
+        # Nettoyage du fichier analysé
+        try:
+            os.remove(chunk_path)
+        except OSError:
+            pass
 
-                for s in segments:
-                    text = s.text.strip()
-                    clean_lower = text.lower()
-
-                    # Rejet musique / silence
-                    if s.no_speech_prob > 0.6:
-                        continue
-
-                    # Rejet ponctuation vide
-                    if not text or text in ["...", "…", ".", "-"]:
-                        continue
-
-                    # Rejet des hallucinations connues
-                    if any(w in clean_lower for w in BANNED_WORDS):
-                        continue
-
-                    # Insertion MariaDB
-                    sql = """
-                        INSERT INTO transcriptions (frequency, start_time, end_time, text)
-                        VALUES (%s, %s, %s, %s)
-                    """
-                    cursor.execute(sql, (FREQ, s.start, s.end, text))
-                    inserted_id = cursor.lastrowid
-                    if first_id is None:
-                        first_id = inserted_id
-                    last_id = inserted_id
-                    captured_segments.append(text)
-                    print(f"  [SQL #{inserted_id}] {text}")
-
-                # 3. Indexation ChromaDB du bloc agrégé
-                duree = time.time() - t0
-                if captured_segments:
-                    aggregated_text = " ".join(captured_segments)
-                    chunk_uid = f"chunk_{timestamp_unix}"
-
-                    collection.add(
-                        documents=[aggregated_text],
-                        metadatas=[
-                            {
-                                "frequency": FREQ,
-                                "captured_at": timestamp_str,
-                                "timestamp": timestamp_unix,
-                                "db_start_id": first_id,
-                                "db_end_id": last_id,
-                            }
-                        ],
-                        ids=[chunk_uid],
-                    )
-                    print(
-                        f"[ChromaDB] Bloc {timestamp_str} indexé en {duree:.2f}s "
-                        f"({len(captured_segments)} segments) -> ID: {chunk_uid}\n"
-                    )
-                else:
-                    print(
-                        f"[-] Bloc {timestamp_str} ignoré (musique/silence) en {duree:.2f}s\n"
-                    )
-
-            except Exception as e:
-                print(f"[!] Erreur de traitement sur {file_to_process} : {e}")
-
-            finally:
-                # 4. Archivage ou suppression du fichier audio traité
-                dest_archive = os.path.join(ARCHIVE_DIR, Path(file_to_process).name)
-                try:
-                    shutil.move(file_to_process, dest_archive)
-                except OSError:
-                    try:
-                        os.remove(file_to_process)
-                    except OSError:
-                        pass
-
-        time.sleep(1)
-
-except KeyboardInterrupt:
-    print("\nArrêt du pipeline...")
-    capture_process.terminate()
-    capture_process.wait()
+except Exception as e:
+    print(f"\n[!] Erreur inattendue dans la boucle d'ingestion : {e}")
 finally:
-    cursor.close()
-    db.close()
+    signal_handler(signal.SIGTERM, None)
