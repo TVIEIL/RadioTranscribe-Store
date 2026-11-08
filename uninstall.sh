@@ -17,29 +17,65 @@ ENV_NAME="sdr-stt"
 
 echo "=== Désinstallation de RadioTranscribe-Store ==="
 
-# --- 1. Arrêt et suppression du service de veille radio ---
-echo "[1/4] Arrêt et suppression du service systemd..."
-if systemctl is-active --quiet radio-pipeline.service 2>/dev/null; then
-    systemctl stop radio-pipeline.service
-    echo "  -> Service radio-pipeline arrêté."
+# --- 1. Suppression de la planification Cron ---
+echo "[1/6] Suppression des tâches planifiées Cron..."
+if [ -f /etc/cron.d/radio-pipeline ]; then
+    rm -f /etc/cron.d/radio-pipeline
+    echo "  -> Fichier /etc/cron.d/radio-pipeline supprimé."
+fi
+
+# --- 2. Arrêt et suppression des services systemd ---
+echo "[2/6] Arrêt des services et suppression des unités systemd..."
+
+# Arrêt de toutes les instances template actives (inter, culture, info...)
+systemctl stop "radio-pipeline@*.service" 2>/dev/null || true
+systemctl stop radio-pipeline.service 2>/dev/null || true
+
+# Nettoyage des processus zombies éventuels
+pkill -9 -f "radio_pipeline.py" 2>/dev/null || true
+pkill -9 -f "rtl_fm" 2>/dev/null || true
+
+# Suppression des fichiers d'unité
+RELOAD_NEEDED=0
+if [ -f /etc/systemd/system/radio-pipeline@.service ]; then
+    systemctl disable "radio-pipeline@*.service" 2>/dev/null || true
+    rm -f /etc/systemd/system/radio-pipeline@.service
+    RELOAD_NEEDED=1
+    echo "  -> Modèle systemd radio-pipeline@.service supprimé."
 fi
 
 if [ -f /etc/systemd/system/radio-pipeline.service ]; then
     systemctl disable radio-pipeline.service 2>/dev/null || true
     rm -f /etc/systemd/system/radio-pipeline.service
+    RELOAD_NEEDED=1
+    echo "  -> Service legacy radio-pipeline.service supprimé."
+fi
+
+# Gestion du service ChromaDB
+if [ -f /etc/systemd/system/chromadb.service ]; then
+    read -p "  Voulez-vous également arrêter et désinstaller le service systemd ChromaDB ? (o/N) : " drop_chroma_srv
+    if [[ "$drop_chroma_srv" =~ ^[oOyY]$ ]]; then
+        systemctl stop chromadb.service 2>/dev/null || true
+        systemctl disable chromadb.service 2>/dev/null || true
+        rm -f /etc/systemd/system/chromadb.service
+        RELOAD_NEEDED=1
+        echo "  -> Service chromadb.service supprimé."
+    else
+        echo "  -> Service chromadb.service conservé actif."
+    fi
+fi
+
+if [ "$RELOAD_NEEDED" -eq 1 ]; then
     systemctl daemon-reload
-    echo "  -> Fichier de service radio-pipeline supprimé."
 fi
 
-# --- 2. Nettoyage de la mémoire temporaire (RAM disk) ---
-echo "[2/4] Nettoyage du RAM disk (/dev/shm/radio_chunks)..."
-if [ -d /dev/shm/radio_chunks ]; then
-    rm -rf /dev/shm/radio_chunks
-    echo "  -> Répertoire temporaire purgé."
-fi
+# --- 3. Nettoyage de la mémoire temporaire (RAM disk) ---
+echo "[3/6] Nettoyage du RAM disk (/dev/shm)..."
+rm -rf /dev/shm/radio_chunks*
+echo "  -> Tous les répertoires temporaires /dev/shm/radio_chunks* ont été purgés."
 
-# --- 3. Suppression ciblée de la base et du compte MariaDB (optionnel) ---
-echo "[3/4] Base de données MariaDB"
+# --- 4. Suppression de la base et du compte MariaDB (optionnel) ---
+echo "[4/6] Base de données MariaDB"
 echo "  Note : Le serveur MariaDB reste intact."
 read -p "  Voulez-vous supprimer la base 'radio_monitoring' et l'utilisateur 'radio_user' ? (o/N) : " drop_db
 
@@ -54,9 +90,21 @@ else
     echo "  -> Base et données MariaDB conservées."
 fi
 
-# --- 4. Environnement virtuel Conda sdr-stt (optionnel) ---
-echo "[4/4] Environnement Python Conda"
-echo "  Note : L'installation de Miniconda et les autres environnements restent intacts."
+# --- 5. Données ChromaDB locales (optionnel) ---
+echo "[5/6] Données vectorielles ChromaDB"
+if [ -d "$TARGET_HOME/chroma_data" ]; then
+    read -p "  Voulez-vous supprimer l'index vectoriel ($TARGET_HOME/chroma_data) ? (o/N) : " drop_chroma_data
+    if [[ "$drop_chroma_data" =~ ^[oOyY]$ ]]; then
+        rm -rf "$TARGET_HOME/chroma_data"
+        echo "  -> Dossier chroma_data supprimé."
+    else
+        echo "  -> Données vectorielles conservées."
+    fi
+fi
+
+# --- 6. Environnement virtuel Conda sdr-stt (optionnel) ---
+echo "[6/6] Environnement Python Conda"
+echo "  Note : Miniconda et les autres environnements restent intacts."
 if [ -d "$CONDA_DIR/envs/$ENV_NAME" ]; then
     read -p "  Voulez-vous supprimer l'environnement Conda '$ENV_NAME' ? (o/N) : " drop_env
     if [[ "$drop_env" =~ ^[oOyY]$ ]]; then
@@ -71,4 +119,4 @@ fi
 
 echo ""
 echo "=== Désinstallation terminée ==="
-echo "Le serveur ChromaDB, MariaDB, les packages système (RTL-SDR/ffmpeg) et vos archives audio ont été conservés."
+echo "Les paquets système de base (RTL-SDR, FFmpeg, MariaDB), le blacklist noyau DVB et les dossiers d'archive restent en place."
