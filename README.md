@@ -50,4 +50,18 @@ chmod +x uninstall.sh
 sudo ./uninstall.sh
 ```
 
+## Vérification et supervision
+
+Une fois l'installation terminée, vous pouvez contrôler le bon fonctionnement de chaque maillon du pipeline :
+
+### 1. Pipeline de transcription et logs en direct
+```bash
+# Vérifier l'état du service systemd
+systemctl status *radio* --no-pager
+
+# Suivre les transcriptions et le filtrage en temps réel
+journalctl -u "*radio*" -f
+
+
+
 
