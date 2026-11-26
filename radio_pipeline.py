@@ -60,6 +60,12 @@ SNR_THRESHOLD_DB = 15.0
 CRITICAL_FLOOR_DB = 5.0
 CHUNK_DURATION_SEC = 30
 
+# Configuration Faster-Whisper (surchargeable via variables d'environnement)
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "16"))
+
 # Configuration bases de données
 DB_HOST = "127.0.0.1"
 DB_USER = "root"
@@ -101,7 +107,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def check_internet(host="1.1.1.1", port=53, timeout=2.0) -> bool:
-    """Vérifie la connectivité sortante en testant une socket UDP rapide."""
+    """Vérifie la connectivité sortante en testant une socket TCP rapide."""
     try:
         socket.setdefaulttimeout(timeout)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -222,7 +228,7 @@ else:
     freq_label = f"{args.station.upper()[:3]}-WEB"  # ex: INT-WEB
     source_pipe = f"ffmpeg -y -i '{source_target}' -ac 1 -ar 16000 -f s16le -loglevel quiet -"
 
-# Branche d'écoute permanente tolérante aux pannes ALSA
+# Branche d'écoute permanente tolérante aux pannes ALSA (active par défaut)
 if not args.mute:
     monitor_pipe = "tee >( aplay -q -r 16000 -f S16_LE -c 1 || cat >/dev/null ) 2>/dev/null | "
     print("[*] Écoute haut-parleur activée (tolérante aux erreurs ALSA/carte son).")
@@ -236,11 +242,12 @@ segment_pipe = f"ffmpeg -f s16le -ar 16000 -ac 1 -i - -f segment -segment_time {
 full_capture_cmd = f"{source_pipe} | {monitor_pipe} {segment_pipe}"
 
 # Initialisation du modèle Faster-Whisper
-print("[*] Chargement du modèle Faster-Whisper large-v3...")
+print(f"[*] Chargement du modèle Faster-Whisper {WHISPER_MODEL} ({WHISPER_DEVICE} / {WHISPER_COMPUTE_TYPE})...")
 model = WhisperModel(
-    "large-v3",
-    device="cuda",
-    compute_type="float16"
+    WHISPER_MODEL,
+    device=WHISPER_DEVICE,
+    compute_type=WHISPER_COMPUTE_TYPE,
+    cpu_threads=WHISPER_THREADS,
 )
 
 # Connexions aux bases de données
@@ -289,7 +296,8 @@ try:
             timestamp_dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
             timestamp_unix = int(timestamp_dt.timestamp())
         except ValueError:
-            timestamp_unix = int(time.time())
+            timestamp_dt = datetime.now()
+            timestamp_unix = int(timestamp_dt.timestamp())
 
         t0 = time.time()
         segments_gen, _ = model.transcribe(
@@ -297,7 +305,9 @@ try:
             language="fr",
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
-            beam_size=5
+            beam_size=5,
+            condition_on_previous_text=False,
+            repetition_penalty=1.2,
         )
 
         segments = list(segments_gen)
