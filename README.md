@@ -54,13 +54,29 @@ sudo ./uninstall.sh
 
 Une fois l'installation terminée, vous pouvez contrôler le bon fonctionnement de chaque maillon du pipeline :
 
-### 1. Pipeline de transcription et logs en direct
+### 1. Tâche Cron, processus actifs et logs
 ```bash
-# Vérifier l'état du service systemd
-systemctl status *radio* --no-pager
+# Vérifier la planification cron (utilisateur courant et root)
+crontab -l
+sudo crontab -l
 
-# Suivre les transcriptions et le filtrage en temps réel
-journalctl -u "*radio*" -f
+# Vérifier les processus en cours d'exécution (SDR, découpage audio, transcription)
+pgrep -af "radio|rtl_fm|ffmpeg"
+
+# Contrôler les segments audio temporaires en RAM
+ls -lh /dev/shm/
+
+# Suivre les exécutions cron dans les journaux système
+journalctl -u cron -n 20 --no-pager
+
+
+# Vérifier que le modèle est bien chargé en VRAM lors d'une exécution
+nvidia-smi
+
+
+
+
+
 
 
 
