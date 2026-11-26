@@ -22,7 +22,7 @@
 [ RAM Disk : /dev/shm ] ──(découpage en segments audio temporaires sans usure disque)
       │
       ▼
-[ Faster-Whisper (large-v3) ] ──(CTranslate2, ex: 16 threads CPU)
+[ Faster-Whisper (large-v3) ] ──(CTranslate2 : GPU CUDA float16 par défaut | CPU int8, ex: 16 threads)
       │
       ├──> [ Filtre anti-hallucinations ] (purge des artefacts télétexte, génériques...)
       │
