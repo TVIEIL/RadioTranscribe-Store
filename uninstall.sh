@@ -31,8 +31,8 @@ echo "[2/6] Arrêt des services et suppression des unités systemd..."
 systemctl stop "radio-pipeline@*.service" 2>/dev/null || true
 systemctl stop radio-pipeline.service 2>/dev/null || true
 
-# Nettoyage des processus zombies éventuels
-pkill -9 -f "radio_pipeline.py" 2>/dev/null || true
+# Nettoyage des processus zombies éventuels (script, capture SDR, retour audio)
+pkill -9 -f "radio_pipeline" 2>/dev/null || true
 pkill -9 -f "rtl_fm" 2>/dev/null || true
 
 # Suppression des fichiers d'unité
@@ -67,6 +67,7 @@ fi
 
 if [ "$RELOAD_NEEDED" -eq 1 ]; then
     systemctl daemon-reload
+    systemctl reset-failed 2>/dev/null || true
 fi
 
 # --- 3. Nettoyage de la mémoire temporaire (RAM disk) ---
@@ -102,11 +103,11 @@ if [ -d "$TARGET_HOME/chroma_data" ]; then
     fi
 fi
 
-# --- 6. Environnement virtuel Conda sdr-stt (optionnel) ---
-echo "[6/6] Environnement Python Conda"
-echo "  Note : Miniconda et les autres environnements restent intacts."
+# --- 6. Environnement virtuel Conda & cache modèle Whisper (optionnel) ---
+echo "[6/6] Environnement Python Conda ($ENV_NAME)"
+echo "  Note : Miniconda, les autres environnements et les pilotes NVIDIA système restent intacts."
 if [ -d "$CONDA_DIR/envs/$ENV_NAME" ]; then
-    read -p "  Voulez-vous supprimer l'environnement Conda '$ENV_NAME' ? (o/N) : " drop_env
+    read -p "  Voulez-vous supprimer l'environnement Conda '$ENV_NAME' (inclut Faster-Whisper et CUDA/cuDNN) ? (o/N) : " drop_env
     if [[ "$drop_env" =~ ^[oOyY]$ ]]; then
         sudo -u "$TARGET_USER" "$CONDA_DIR/bin/conda" env remove -n "$ENV_NAME" -y 2>/dev/null || rm -rf "$CONDA_DIR/envs/$ENV_NAME"
         echo "  -> Environnement '$ENV_NAME' supprimé."
@@ -117,6 +118,15 @@ else
     echo "  -> Aucun environnement '$ENV_NAME' détecté."
 fi
 
+HF_MODEL_CACHE="$TARGET_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3"
+if [ -d "$HF_MODEL_CACHE" ]; then
+    read -p "  Voulez-vous supprimer le cache du modèle Whisper large-v3 (~3 Go) ? (o/N) : " drop_hf
+    if [[ "$drop_hf" =~ ^[oOyY]$ ]]; then
+        rm -rf "$HF_MODEL_CACHE"
+        echo "  -> Cache du modèle large-v3 supprimé."
+    fi
+fi
+
 echo ""
 echo "=== Désinstallation terminée ==="
-echo "Les paquets système de base (RTL-SDR, FFmpeg, MariaDB), le blacklist noyau DVB et les dossiers d'archive restent en place."
+echo "Les paquets système de base (RTL-SDR, FFmpeg, ALSA, MariaDB), le blacklist noyau DVB et les dossiers d'archive restent en place."
