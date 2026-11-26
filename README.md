@@ -73,6 +73,12 @@ journalctl -u cron -n 20 --no-pager
 # Vérifier que le modèle est bien chargé en VRAM lors d'une exécution
 nvidia-smi
 
+# Vérifier que le démon MariaDB est actif
+systemctl status mariadb --no-pager
+
+# Lister les bases et consulter les dernières entrées archivées
+sudo mariadb -e "SHOW DATABASES;"
+sudo mariadb -D <base> -e "SELECT * FROM <table> ORDER BY id DESC LIMIT 5;"
 
 
 
