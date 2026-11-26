@@ -121,8 +121,8 @@ def check_internet(host="1.1.1.1", port=53, timeout=2.0) -> bool:
         return False
 
 
-def measure_rf_snr(freq_hz: float, sample_rate: int = 250000, duration: float = 0.4) -> float:
-    """Capture une courte trame I/Q brute avec rtl_sdr pour calculer le SNR RF."""
+def measure_rf_snr(freq_hz: float, sample_rate: int = 250000, duration: float = 0.5) -> float:
+    """Démodule une courte capture I/Q et mesure le SNR FM (pilote 19 kHz + audio MPX)."""
     num_samples = int(sample_rate * duration)
     cmd = [
         "rtl_sdr",
@@ -141,22 +141,28 @@ def measure_rf_snr(freq_hz: float, sample_rate: int = 250000, duration: float = 
         iq = np.frombuffer(raw_bytes, dtype=np.uint8).astype(np.float32) - 127.5
         iq_complex = iq[0::2] + 1j * iq[1::2]
 
-        # FFT avec suppression de l'offset DC central
-        fft_vals = np.abs(np.fft.fftshift(np.fft.fft(iq_complex))) ** 2
-        center = len(fft_vals) // 2
-        fft_vals[center - 10:center + 10] = 0.0
+        # Discriminateur FM (insensible aux raies parasites CW non modulées)
+        demod = np.angle(iq_complex[1:] * np.conj(iq_complex[:-1]))
+        demod -= np.mean(demod)
 
-        signal_power = np.max(fft_vals)
-        noise_power = np.median(fft_vals)
+        mpx_power = np.abs(np.fft.rfft(demod)) ** 2
+        freqs = np.fft.rfftfreq(len(demod), d=1.0 / sample_rate)
 
-        if noise_power <= 0:
-            return 0.0
+        # 1. Pilote stéréo 19 kHz vs bande de garde vide
+        pilot_mask = (freqs >= 18980) & (freqs <= 19020)
+        guard_mask = ((freqs >= 16000) & (freqs <= 18500)) | ((freqs >= 19500) & (freqs <= 22000))
+        guard_noise = np.median(mpx_power[guard_mask])
+        pilot_snr = 10.0 * np.log10(np.max(mpx_power[pilot_mask]) / guard_noise) if guard_noise > 0 else 0.0
 
-        snr = 10.0 * np.log10(signal_power / noise_power)
-        return float(snr)
+        # 2. Modulation audio L+R (300 Hz - 15 kHz) vs bruit ultrasonore (65 - 95 kHz)
+        audio_mask = (freqs >= 300) & (freqs <= 15000)
+        ultra_mask = (freqs >= 65000) & (freqs <= 95000)
+        ultra_noise = np.mean(mpx_power[ultra_mask])
+        audio_snr = 10.0 * np.log10(np.mean(mpx_power[audio_mask]) / ultra_noise) if ultra_noise > 0 else 0.0
+
+        return float(max(0.0, pilot_snr, audio_snr))
     except Exception:
         return 0.0
-
 
 def resolve_audio_source(station: str):
     """Détermine la meilleure source entre tuner SDR local et flux Icecast HTTP."""
