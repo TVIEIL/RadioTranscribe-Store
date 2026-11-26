@@ -1,15 +1,60 @@
+import os
 import re
 import readline  # Permet d'utiliser les flèches haut/bas pour l'historique dans le prompt
+from datetime import datetime, timedelta
 import chromadb
 
-# Connexion au serveur ChromaDB local
-chroma_client = chromadb.HttpClient(host="localhost", port=8000)
-collection = chroma_client.get_or_create_collection(name="radio_news")
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "radio_news")
 
-DATE_PATTERN = re.compile(r"\b(\d{2})[-/](\d{2})[-/](\d{4})\b")
+# Connexion au serveur ChromaDB local
+chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
+
+DATE_FR_PATTERN = re.compile(r"\b(\d{2})[-/](\d{2})[-/](\d{4})\b")
+DATE_ISO_PATTERN = re.compile(r"\b(\d{4})[-/](\d{2})[-/](\d{2})\b")
+
+
+def extract_date_filter(query: str):
+    """Extrait une date (JJ-MM-AAAA, JJ/MM/AAAA ou AAAA-MM-JJ) et construit le filtre ChromaDB."""
+    date_iso = None
+    cleaned = query
+
+    match_iso = DATE_ISO_PATTERN.search(query)
+    match_fr = DATE_FR_PATTERN.search(query)
+
+    if match_iso:
+        annee, mois, jour = match_iso.groups()
+        date_iso = f"{annee}-{mois}-{jour}"
+        cleaned = DATE_ISO_PATTERN.sub("", query)
+    elif match_fr:
+        jour, mois, annee = match_fr.groups()
+        date_iso = f"{annee}-{mois}-{jour}"
+        cleaned = DATE_FR_PATTERN.sub("", query)
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if not date_iso:
+        return None, None, cleaned
+
+    try:
+        day_start = datetime.strptime(date_iso, "%Y-%m-%d")
+        day_end = day_start + timedelta(days=1)
+    except ValueError:
+        return None, None, query
+
+    where_filter = {
+        "$and": [
+            {"timestamp": {"$gte": int(day_start.timestamp())}},
+            {"timestamp": {"$lt": int(day_end.timestamp())}},
+        ]
+    }
+    return date_iso, where_filter, cleaned
+
 
 print("=== Moteur de recherche radio (ChromaDB) ===")
-print("Tape ta recherche (ex: '21-11-2026 météo') ou 'exit' pour quitter.\n")
+print("Tape ta recherche (ex: '01-11-2026 théâtre' ou '2026-11-26') ou 'exit' pour quitter.\n")
 
 while True:
     try:
@@ -19,24 +64,13 @@ while True:
         if raw_query.lower() in ["exit", "quit", "q"]:
             break
 
-        # Détection automatique d'une date JJ-MM-AAAA ou JJ/MM/AAAA
-        date_iso = None
-        match = DATE_PATTERN.search(raw_query)
-        if match:
-            jour, mois, annee = match.groups()
-            date_iso = f"{annee}-{mois}-{jour}"
-            # Retire la date du texte pour garder uniquement les mots-clés sémantiques
-            clean_query = re.sub(r"\s+", " ", DATE_PATTERN.sub("", raw_query)).strip()
-        else:
-            clean_query = raw_query
-
-        where_filter = {"date": date_iso} if date_iso else None
+        date_iso, where_filter, clean_query = extract_date_filter(raw_query)
 
         # Cas 1 : l'utilisateur a saisi uniquement une date sans mots-clés
         if date_iso and not clean_query:
             res = collection.get(
                 where=where_filter,
-                limit=5,
+                limit=10,
                 include=["documents", "metadatas"],
             )
             docs = res["documents"]
@@ -46,7 +80,7 @@ while True:
                 print(f"[-] Aucune archive trouvée pour le {date_iso}.")
                 continue
 
-            print(f"\n--- Archives du {date_iso} (5 premières) ---")
+            print(f"\n--- Archives du {date_iso} ({len(docs)} affichées) ---")
             for i, (doc, meta) in enumerate(zip(docs, metas), 1):
                 date_str = meta.get("captured_at", date_iso)
                 print(f"\n[{i}] Capture du {date_str}")
