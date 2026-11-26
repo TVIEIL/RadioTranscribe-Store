@@ -20,7 +20,7 @@
 
 """
 radio_pipeline.py - Pipeline continu de veille et transcription radio.
-RTL-SDR -> RAM Disk (/dev/shm) -> Faster-Whisper -> MariaDB & ChromaDB.
+RTL-SDR -> RAM Disk (/dev/shm) -> Faster-Whisper -> MariaDB & ChromaDB (HTTP).
 """
 import os
 import sys
@@ -66,12 +66,16 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
 WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "16"))
 
-# Configuration bases de données
-DB_HOST = "127.0.0.1"
-DB_USER = "root"
-DB_PASS = ""
-DB_NAME = "radio_db"
-CHROMA_PATH = os.path.expanduser("~/sdr-stt/chroma_data")
+# Configuration MariaDB et ChromaDB (alignée avec install.sh et compute1)
+DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_USER = os.getenv("DB_USER", "radio_user")
+DB_PASS = os.getenv("DB_PASS", "votre_mot_de_passe")
+DB_NAME = os.getenv("DB_NAME", "radio_monitoring")
+
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "radio_news")
 
 # Mots/expressions parasites à filtrer
 BANNED_WORDS = [
@@ -202,7 +206,7 @@ args = parser.parse_args()
 
 # Cloisonnement étanche de l'espace temporaire en RAM par station
 TEMP_DIR = f"/dev/shm/radio_chunks_{args.station}"
-ARCHIVE_DIR = os.path.expanduser(f"~/sdr-stt/archive_{args.station}")
+ARCHIVE_DIR = os.path.expanduser(f"~/radio_archive/{args.station}")
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
@@ -219,10 +223,10 @@ if args.force_http:
 else:
     source_type, source_target = resolve_audio_source(args.station)
 
-# Construction de la commande de capture (labels limités à 8 caractères pour MariaDB VARCHAR(10))
+# Construction de la commande de capture
 if source_type == "rf":
     freq_int = int(source_target)
-    freq_label = f"{args.station.upper()[:3]}-{freq_int / 1e6:.1f}"  # ex: INT-87.8
+    freq_label = f"{freq_int / 1e6:.1f}M"  # ex: 87.8M (format historique compute1)
     source_pipe = f"rtl_fm -f {freq_int} -M wfm -s 200k -r 16k -g 42 -E deemp - 2>/dev/null"
 else:
     freq_label = f"{args.station.upper()[:3]}-WEB"  # ex: INT-WEB
@@ -251,9 +255,10 @@ model = WhisperModel(
 )
 
 # Connexions aux bases de données
-print("[*] Connexion MariaDB et ChromaDB...")
+print(f"[*] Connexion MariaDB ({DB_NAME}) et ChromaDB ({CHROMA_HOST}:{CHROMA_PORT}/{CHROMA_COLLECTION})...")
 db_conn = pymysql.connect(
     host=DB_HOST,
+    port=DB_PORT,
     user=DB_USER,
     password=DB_PASS,
     database=DB_NAME,
@@ -262,9 +267,9 @@ db_conn = pymysql.connect(
 )
 cursor = db_conn.cursor()
 
-chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
 chroma_collection = chroma_client.get_or_create_collection(
-    name="radio_transcriptions",
+    name=CHROMA_COLLECTION,
     metadata={"hnsw:space": "cosine"}
 )
 
@@ -312,6 +317,8 @@ try:
 
         segments = list(segments_gen)
         captured_segments = []
+        db_start_id = None
+        db_end_id = None
 
         if not segments:
             duree = time.time() - t0
@@ -341,6 +348,10 @@ try:
             """
             cursor.execute(sql, (freq_label, s.start, s.end, text))
             inserted_id = cursor.lastrowid
+            if db_start_id is None:
+                db_start_id = inserted_id
+            db_end_id = inserted_id
+
             captured_segments.append(text)
             print(f" [SQL #{inserted_id}] {text}")
 
@@ -349,13 +360,15 @@ try:
         # Indexation vectorielle dans ChromaDB
         if captured_segments:
             aggregated_text = " ".join(captured_segments)
-            chunk_uid = f"chunk_{timestamp_unix}"
+            chunk_uid = f"{args.station}_{timestamp_unix}"
             chroma_collection.add(
                 documents=[aggregated_text],
                 metadatas=[{
                     "frequency": freq_label,
                     "timestamp": timestamp_unix,
-                    "segments_count": len(captured_segments)
+                    "captured_at": timestamp_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "db_start_id": db_start_id,
+                    "db_end_id": db_end_id,
                 }],
                 ids=[chunk_uid]
             )
