@@ -83,7 +83,7 @@ sudo mariadb -D radio_monitoring -e "SELECT * FROM transcriptions ORDER BY id DE
 
 ## Configuration matérielle (GPU CUDA / CPU)
 
-Par défaut, le déploiement configure Faster-Whisper pour exploiter l'accélération matérielle d'un GPU NVIDIA (`WHISPER_DEVICE=cuda` et `WHISPER_COMPUTE_TYPE=float16`)[span_0](start_span)[span_0](end_span).
+Par défaut, le déploiement configure Faster-Whisper pour exploiter l'accélération matérielle d'un GPU NVIDIA (`WHISPER_DEVICE=cuda` et `WHISPER_COMPUTE_TYPE=float16`)
 
 Si vous souhaitez exécuter la transcription uniquement sur processeur (CPU), ouvrez le service `systemd` (`/etc/systemd/system/radio-pipeline.service` ou via `sudo systemctl edit --full radio-pipeline`) et remplacez les variables d'environnement par les lignes suivantes :
 
