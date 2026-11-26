@@ -79,6 +79,31 @@ systemctl status mariadb --no-pager
 # Lister les bases et consulter les dernières entrées archivées
 sudo mariadb -e "SHOW DATABASES;"
 sudo mariadb -D radio_monitoring -e "SELECT * FROM transcriptions ORDER BY id DESC LIMIT 5;"
+```
+
+## Configuration matérielle (GPU CUDA / CPU)
+
+Par défaut, le déploiement configure Faster-Whisper pour exploiter l'accélération matérielle d'un GPU NVIDIA (`WHISPER_DEVICE=cuda` et `WHISPER_COMPUTE_TYPE=float16`)[span_0](start_span)[span_0](end_span).
+
+Si vous souhaitez exécuter la transcription uniquement sur processeur (CPU), ouvrez le service `systemd` (`/etc/systemd/system/radio-pipeline.service` ou via `sudo systemctl edit --full radio-pipeline`) et remplacez les variables d'environnement par les lignes suivantes :
+
+```ini
+Environment="WHISPER_DEVICE=cpu"
+Environment="WHISPER_COMPUTE_TYPE=int8"
+Environment="WHISPER_THREADS=16"
+```
+
+* **`WHISPER_DEVICE`** : doit impérativement être renseigné en minuscules (`cpu`).
+* **`WHISPER_COMPUTE_TYPE`** : sur processeur x86, utilisez `int8` (recommandé pour les performances) ou `float32` (`float16` n'étant supporté que sur GPU).
+* **`WHISPER_THREADS`** : à adapter selon le nombre de cœurs physiques alloués au pipeline.
+
+Rechargez ensuite la configuration et redémarrez le service :
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart radio-pipeline
+```
+
 
 
 
