@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install.sh - Déploiement automatisé pour RadioTranscribe-Store
+# install.sh - Déploiement automatisé pour RadioTranscribe-Store (CPU / GPU CUDA)
 # =============================================================================
 set -e
 
@@ -18,10 +18,10 @@ echo "=== Déploiement de RadioTranscribe-Store pour : $TARGET_USER ==="
 # --- 1. Dépendances système ---
 echo "[1/8] Installation des paquets requis..."
 apt update
-apt install -y rtl-sdr librtlsdr-dev ffmpeg mariadb-server curl git build-essential cron
+apt install -y rtl-sdr librtlsdr-dev ffmpeg alsa-utils mariadb-server curl git build-essential cron
 
-# --- 2. Neutralisation du pilote TV DVB ---
-echo "[2/8] Configuration de la clé RTL-SDR..."
+# --- 2. Neutralisation du pilote TV DVB & droits matériel ---
+echo "[2/8] Configuration de la clé RTL-SDR et de l'audio..."
 cat << 'EOF' > /etc/modprobe.d/blacklist-rtl.conf
 blacklist dvb_usb_rtl28xxu
 blacklist rtl2832
@@ -31,7 +31,7 @@ blacklist dvb_core
 EOF
 
 modprobe -r dvb_usb_rtl28xxu 2>/dev/null || true
-usermod -aG plugdev "$TARGET_USER"
+usermod -aG plugdev,audio "$TARGET_USER"
 
 # --- 3. MariaDB ---
 echo "[3/8] Initialisation de la base MariaDB..."
@@ -67,7 +67,7 @@ sudo -u "$TARGET_USER" mkdir -p "$TARGET_HOME/chroma_data"
 mkdir -p /dev/shm/radio_chunks
 chmod 777 /dev/shm/radio_chunks
 
-# --- 5. Miniconda & Dépendances Python ---
+# --- 5. Miniconda, Détection GPU & Dépendances Python ---
 CONDA_DIR="$TARGET_HOME/miniconda3"
 CONDA_BIN="$CONDA_DIR/bin/conda"
 
@@ -84,6 +84,7 @@ fi
 
 ENV_NAME="sdr-stt"
 ENV_PYTHON="$CONDA_DIR/envs/$ENV_NAME/bin/python"
+ENV_PIP="$CONDA_DIR/envs/$ENV_NAME/bin/pip"
 
 if [ ! -d "$CONDA_DIR/envs/$ENV_NAME" ]; then
     echo "[+] Création de l'environnement Conda '$ENV_NAME'..."
@@ -92,12 +93,27 @@ fi
 
 if [ -f "$PROJECT_DIR/requirements.txt" ]; then
     echo "[+] Installation des paquets Python..."
-    sudo -u "$TARGET_USER" "$CONDA_DIR/envs/$ENV_NAME/bin/pip" install --upgrade pip
-    sudo -u "$TARGET_USER" "$CONDA_DIR/envs/$ENV_NAME/bin/pip" install -r "$PROJECT_DIR/requirements.txt"
+    sudo -u "$TARGET_USER" "$ENV_PIP" install --upgrade pip
+    sudo -u "$TARGET_USER" "$ENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
+fi
+
+# Détection automatique d'un GPU NVIDIA pour activer CUDA / float16
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+    echo "[+] GPU NVIDIA détecté : installation des bibliothèques CUDA/cuDNN..."
+    sudo -u "$TARGET_USER" "$ENV_PIP" install nvidia-cublas-cu12 nvidia-cudnn-cu12
+    SITE_PACKAGES=$("$ENV_PYTHON" -c "import site; print(site.getsitepackages()[0])")
+    CUDA_ENV_LINE="Environment=\"LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cudnn/lib\""
+    WHISPER_DEVICE="cuda"
+    WHISPER_COMPUTE_TYPE="float16"
+else
+    echo "[*] Aucun GPU NVIDIA détecté : configuration en mode CPU (int8)..."
+    CUDA_ENV_LINE="# Pas de bibliothèque CUDA requise en mode CPU"
+    WHISPER_DEVICE="cpu"
+    WHISPER_COMPUTE_TYPE="int8"
 fi
 
 # --- 6. Services Systemd (Template @) ---
-echo "[6/8] Génération des unités systemd..."
+echo "[6/8] Génération des unités systemd ($WHISPER_DEVICE / $WHISPER_COMPUTE_TYPE)..."
 
 # Serveur vectoriel ChromaDB
 cat << EOF > /etc/systemd/system/chromadb.service
@@ -121,17 +137,25 @@ EOF
 cat << EOF > /etc/systemd/system/radio-pipeline@.service
 [Unit]
 Description=Pipeline Transcription Radio - %i
-After=network.target mariadb.service chromadb.service
+After=network.target sound.target mariadb.service chromadb.service
 Requires=mariadb.service chromadb.service
 
 [Service]
 Type=simple
 User=$TARGET_USER
 WorkingDirectory=$PROJECT_DIR
+Environment="PYTHONUNBUFFERED=1"
 Environment="DB_USER=$DB_USER"
 Environment="DB_PASS=$DB_PASS"
 Environment="DB_NAME=$DB_NAME"
+Environment="WHISPER_MODEL=large-v3"
+Environment="WHISPER_DEVICE=$WHISPER_DEVICE"
+Environment="WHISPER_COMPUTE_TYPE=$WHISPER_COMPUTE_TYPE"
+Environment="WHISPER_THREADS=16"
+$CUDA_ENV_LINE
 ExecStart=$ENV_PYTHON $PROJECT_DIR/radio_pipeline.py --station %i
+KillSignal=SIGTERM
+TimeoutStopSec=35s
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -177,7 +201,7 @@ echo "[8/8] Démarrage du serveur vectoriel ChromaDB..."
 systemctl restart chromadb.service
 
 echo ""
-echo "=== Déploiement terminé ! ==="
+echo "=== Déploiement terminé (Mode Whisper : $WHISPER_DEVICE / $WHISPER_COMPUTE_TYPE) ! ==="
 echo "Les rendez-vous d'enregistrement sont inscrits dans : $CRON_FILE"
 echo ""
 echo "Pour tester immédiatement une station hors créneau :"
