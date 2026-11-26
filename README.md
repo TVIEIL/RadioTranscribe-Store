@@ -106,6 +106,41 @@ sudo systemctl restart radio-pipeline
 
 
 
+## Interrogation sémantique des archives (`query_radio.py`)
+
+Le script `query_radio.py` permet d'interroger en langage naturel les transcriptions indexées dans la collection `radio_news` de ChromaDB.
+
+Activez l'environnement Conda dédié puis lancez le script interactif :
+
+```bash
+conda activate sdr-stt
+python3 query_radio.py
+```
+
+### Exemple de session
+
+```text
+=== Moteur de recherche radio (ChromaDB) ===
+Tape ta recherche ou 'exit' pour quitter.
+
+
+[Question / Thème] > météo et températures en Île-de-France
+
+--- Résultats pour : « météo et températures en Île-de-France » ---
+
+[1] Capture du 2026-11-26 19:03:18 (Pertinence : 64%)
+    « Un temps calme et frais se maintient demain matin sur la région parisienne avec quelques bancs de brouillard en vallée de Seine et des minimales autour de 3 degrés. »
+
+[2] Capture du 2026-11-26 13:01:45 (Pertinence : 57%)
+    « Les températures resteront légèrement en dessous des normales de saison cet après-midi avant l'arrivée d'une perturbation pluvieuse par l'ouest en fin de week-end. »
+
+[3] Capture du 2026-11-26 08:02:10 (Pertinence : 49%)
+    « Côté prévisions, le soleil s'imposera progressivement après la dissipation des nuages bas, avec un vent faible de secteur nord-est. »
+
+[Question / Thème] > exit
+
+Fermeture.
+```
 
 
 
