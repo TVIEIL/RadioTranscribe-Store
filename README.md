@@ -78,7 +78,7 @@ systemctl status mariadb --no-pager
 
 # Lister les bases et consulter les dernières entrées archivées
 sudo mariadb -e "SHOW DATABASES;"
-sudo mariadb -D <base> -e "SELECT * FROM <table> ORDER BY id DESC LIMIT 5;"
+sudo mariadb -D radio_monitoring -e "SELECT * FROM transcriptions ORDER BY id DESC LIMIT 5;"
 
 
 
