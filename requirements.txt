@@ -87,3 +87,7 @@ watchfiles==1.3.0
 websocket-client==1.9.2
 websockets==17.3
 yarl==1.25.1
+
+# Optionnel (uniquement pour accélération GPU NVIDIA dans un venv pip sans Conda/CUDA système) :
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12
