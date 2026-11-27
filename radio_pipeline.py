@@ -57,7 +57,7 @@ STATIONS_CONFIG = {
 }
 
 SNR_THRESHOLD_DB = 15.0
-CRITICAL_FLOOR_DB = 5.0
+CRITICAL_FLOOR_DB = 10.0
 CHUNK_DURATION_SEC = 30
 
 # Configuration Faster-Whisper (surchargeable via variables d'environnement)
@@ -186,9 +186,18 @@ def resolve_audio_source(station: str):
     if best_snr >= SNR_THRESHOLD_DB:
         return "rf", best_freq
 
-    # Signal insuffisant : basculement conditionnel
+    # Signal insuffisant : basculement conditionnel (avec attente réseau au boot)
     print("[*] Signal RF faible. Contrôle de la connexion Internet...")
-    if check_internet():
+    internet_ok = False
+    for attempt in range(1, 7):
+        if check_internet():
+            internet_ok = True
+            break
+        if attempt < 6:
+            print(f"[*] Réseau indisponible (tentative {attempt}/6), nouvel essai dans 3s...")
+            time.sleep(3)
+
+    if internet_ok:
         print("[*] Connexion active : bascule sur le flux HTTP officiel.")
         return "http", cfg["http_fallback"]
 

@@ -119,7 +119,8 @@ echo "[6/8] Génération des unités systemd ($WHISPER_DEVICE / $WHISPER_COMPUTE
 cat << EOF > /etc/systemd/system/chromadb.service
 [Unit]
 Description=ChromaDB Vector Store Server
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -137,7 +138,8 @@ EOF
 cat << EOF > /etc/systemd/system/radio-pipeline@.service
 [Unit]
 Description=Pipeline Transcription Radio - %i
-After=network.target sound.target mariadb.service chromadb.service
+Wants=network-online.target
+After=network-online.target sound.target mariadb.service chromadb.service
 Requires=mariadb.service chromadb.service
 
 [Service]
