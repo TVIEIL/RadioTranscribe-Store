@@ -112,6 +112,10 @@ else
     WHISPER_COMPUTE_TYPE="int8"
 fi
 
+# Pré-téléchargement du modèle dans le cache utilisateur avant activation du mode hors-ligne
+echo "[+] Pré-téléchargement du modèle Whisper (large-v3) dans le cache local..."
+sudo -u "$TARGET_USER" "$ENV_PYTHON" -c "from faster_whisper import download_model; download_model('large-v3')"
+
 # --- 6. Services Systemd (Template @) ---
 echo "[6/8] Génération des unités systemd ($WHISPER_DEVICE / $WHISPER_COMPUTE_TYPE)..."
 
@@ -151,6 +155,7 @@ Environment="DB_USER=$DB_USER"
 Environment="DB_PASS=$DB_PASS"
 Environment="DB_NAME=$DB_NAME"
 Environment="WHISPER_MODEL=large-v3"
+Environment="HF_HUB_OFFLINE=1"
 Environment="WHISPER_DEVICE=$WHISPER_DEVICE"
 Environment="WHISPER_COMPUTE_TYPE=$WHISPER_COMPUTE_TYPE"
 Environment="WHISPER_THREADS=16"
