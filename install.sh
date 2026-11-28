@@ -183,15 +183,15 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
 # --- FRANCE INTER : Matinale / Journal de 8h (07h00 -> 09h00 du lundi au vendredi) ---
-0 7 * * 1-5 root /bin/systemctl start radio-pipeline@inter.service
+0 7 * * 1-5 root /bin/systemctl stop radio-pipeline@culture.service; /bin/systemctl start radio-pipeline@inter.service
 0 9 * * 1-5 root /bin/systemctl stop radio-pipeline@inter.service
 
 # --- FRANCE INTER : Journal de 13h (12h58 -> 13h35 tous les jours) ---
-58 12 * * * root /bin/systemctl start radio-pipeline@inter.service
+58 12 * * * root /bin/systemctl stop radio-pipeline@culture.service; /bin/systemctl start radio-pipeline@inter.service
 35 13 * * * root /bin/systemctl stop radio-pipeline@inter.service
 
-# --- FRANCE CULTURE : Créneau documentaire / débat (ex: 16h00 -> 18h00 du lundi au vendredi) ---
-0 16 * * 1-5 root /bin/systemctl start radio-pipeline@culture.service
+# --- FRANCE CULTURE : Créneau documentaire / débat (16h00 -> 18h00 du lundi au vendredi) ---
+0 16 * * 1-5 root /bin/systemctl stop radio-pipeline@inter.service; /bin/systemctl start radio-pipeline@culture.service
 0 18 * * 1-5 root /bin/systemctl stop radio-pipeline@culture.service
 EOF
 
